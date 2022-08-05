@@ -1,0 +1,7 @@
+main/ca.crt
+main/client.key
+main/client.crt
+sdkconfig
+sdkconfig.old
+build/
+.vscode/

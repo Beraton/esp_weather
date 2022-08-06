@@ -178,12 +178,13 @@ void mqtt_fn(sensorData data) {
             esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, client);
             esp_mqtt_client_start(client);
             break;
-        case MQTT_CONNECTED:
+        case MQTT_CONNECTED: {
             char* buffer;
             buffer = create_json_payload(&data);
             esp_mqtt_client_publish(client, "beraton_pub", buffer, strlen(buffer), 2, false);
             free(buffer);
             break;
+        }
         case MQTT_PUBLISHED:
             esp_mqtt_client_stop(client);
             esp_mqtt_client_destroy(client);

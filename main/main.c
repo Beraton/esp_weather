@@ -21,6 +21,7 @@
 #include "bh1750_init.h"
 
 #define TASK_SIZE_KB 1024
+#define GPIO_OUTPUT_SEL_PIN ((1ULL << CONFIG_I2C_MASTER_SCL | 1ULL << CONFIG_I2C_MASTER_SDA))
 
 #if defined(CONFIG_BH1750_I2C_ADDRESS_LO)
 #define ADDR BH1750_ADDR_LO
@@ -124,6 +125,14 @@ char* create_json_payload(sensorData *data) {
 
 void sensor_measurement(void *pvParameters)
 {
+    gpio_config_t io_config;
+    io_config.mode = GPIO_MODE_OUTPUT;
+    io_config.intr_type = GPIO_INTR_DISABLE;
+    io_config.pin_bit_mask = GPIO_OUTPUT_SEL_PIN;
+    io_config.pull_down_en = 0;
+    io_config.pull_up_en = 0;
+    gpio_config(&io_config);
+
     bmp280_t bme280_dev = bme280_init(CONFIG_I2C_MASTER_SDA, CONFIG_I2C_MASTER_SCL);
     i2c_dev_t bh1750_dev = bh1750_init(CONFIG_I2C_MASTER_SDA, CONFIG_I2C_MASTER_SCL, ADDR);
 
@@ -141,15 +150,6 @@ void sensor_measurement(void *pvParameters)
         }
         if (bh1750_read(&bh1750_dev, &data.lux) != ESP_OK)
             printf("Could not read lux data\n");
-        /*
-        printf("Temperature: %d C, Pressure: %d Pa", data.temperature, data.humidity);
-        printf("Temperature: %s C,", print_float(data.temperature));
-        printf(" Pressure: %s Pa,", print_float(data.pressure));
-        if (bme280p)
-            printf(", Humidity: %s %%", print_float(data.humidity));
-            printf(", Humidity: %d %%", data.pressure);
-        printf(", lux: %d lx\n", data.lux);
-        */
         xQueueSend(sensorQueue, &data, 2000 / portTICK_PERIOD_MS);
         vTaskDelay(pdMS_TO_TICKS(CONFIG_MEASUREMENT_INTERVAL));
     }
@@ -211,8 +211,10 @@ void app_main()
     ESP_LOGI(TAG, "[APP] Startup..");
     ESP_LOGI(TAG, "[APP] Free memory: %d bytes", esp_get_free_heap_size());
     ESP_LOGI(TAG, "[APP] IDF version: %s", esp_get_idf_version());
+    esp_chip_info_t chip_info;
+    esp_chip_info(&chip_info);
     //ESP_ERROR_CHECK(heap_trace_init_standalone(trace_record, NUM_RECORDS));
-    i2cdev_init();
+    ESP_ERROR_CHECK(i2cdev_init());
     ESP_ERROR_CHECK(nvs_flash_init());
     wifi_init_sta();
     wifi_connect_sta(CONFIG_WIFI_SSID, CONFIG_WIFI_PASSWORD, 10000);

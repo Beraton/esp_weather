@@ -30,7 +30,8 @@
 #define ADDR BH1750_ADDR_HI
 #endif
 
-static const char* TAG = "MQTT";
+static const char *TAG = "MQTT";
+uint8_t mac_addr[6];
 
 extern const uint8_t ca_cert_start[] asm("_binary_ca_crt_start");
 extern const uint8_t ca_cert_end[] asm("_binary_ca_crt_end");
@@ -39,12 +40,12 @@ extern const uint8_t client_crt_end[] asm("_binary_client_crt_end");
 extern const uint8_t client_key_start[] asm("_binary_client_key_start");
 extern const uint8_t client_key_end[] asm("_binary_client_key_end");
 
-
-typedef struct sensorData {
-    int32_t temperature;
-    uint32_t humidity;
-    uint32_t pressure;
-    uint16_t lux;
+typedef struct sensorData
+{
+  int32_t temperature;
+  uint32_t humidity;
+  uint32_t pressure;
+  uint16_t lux;
 } sensorData;
 
 QueueHandle_t sensorQueue;
@@ -55,7 +56,7 @@ const uint32_t MQTT_CONNECTED = BIT2;
 const uint32_t MQTT_PUBLISHED = BIT3;
 
 //#define NUM_RECORDS 100
-//static heap_trace_record_t trace_record[NUM_RECORDS];
+// static heap_trace_record_t trace_record[NUM_RECORDS];
 
 void mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
 {
@@ -83,8 +84,6 @@ void mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
     break;
   case MQTT_EVENT_DATA:
     ESP_LOGI(TAG, "MQTT_EVENT_DATA");
-    printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
-    printf("DATA=%.*s\r\n", event->data_len, event->data);
     break;
   case MQTT_EVENT_ERROR:
     ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
@@ -100,9 +99,10 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
   mqtt_event_handler_cb(event_data);
 }
 
-char* create_json_payload(sensorData *data) {
-  //ESP_ERROR_CHECK(heap_trace_start(HEAP_TRACE_LEAKS));
-  char* payload;
+char *create_json_payload(sensorData *data)
+{
+  // ESP_ERROR_CHECK(heap_trace_start(HEAP_TRACE_LEAKS));
+  char *payload;
   char *buf = malloc(sizeof(char) * 20);
   cJSON *json_payload = cJSON_CreateObject();
 
@@ -118,108 +118,117 @@ char* create_json_payload(sensorData *data) {
   cJSON_Delete(json_payload);
   free(buf);
   buf = NULL;
-  //ESP_ERROR_CHECK(heap_trace_stop());
-  //heap_trace_dump();
+  // ESP_ERROR_CHECK(heap_trace_stop());
+  // heap_trace_dump();
   return payload;
 }
 
 void sensor_measurement(void *pvParameters)
 {
-    gpio_config_t io_config;
-    io_config.mode = GPIO_MODE_OUTPUT;
-    io_config.intr_type = GPIO_INTR_DISABLE;
-    io_config.pin_bit_mask = GPIO_OUTPUT_SEL_PIN;
-    io_config.pull_down_en = 0;
-    io_config.pull_up_en = 0;
-    gpio_config(&io_config);
+  gpio_config_t io_config;
+  io_config.mode = GPIO_MODE_OUTPUT;
+  io_config.intr_type = GPIO_INTR_DISABLE;
+  io_config.pin_bit_mask = GPIO_OUTPUT_SEL_PIN;
+  io_config.pull_down_en = 0;
+  io_config.pull_up_en = 0;
+  gpio_config(&io_config);
 
-    bmp280_t bme280_dev = bme280_init(CONFIG_I2C_MASTER_SDA, CONFIG_I2C_MASTER_SCL);
-    i2c_dev_t bh1750_dev = bh1750_init(CONFIG_I2C_MASTER_SDA, CONFIG_I2C_MASTER_SCL, ADDR);
+  bmp280_t bme280_dev = bme280_init(CONFIG_I2C_MASTER_SDA, CONFIG_I2C_MASTER_SCL);
+  i2c_dev_t bh1750_dev = bh1750_init(CONFIG_I2C_MASTER_SDA, CONFIG_I2C_MASTER_SCL, ADDR);
 
-    bool bme280p = bme280_dev.id == BME280_CHIP_ID;
-    printf("BMP280: found %s\n", bme280p ? "BME280" : "BMP280");
+  bool bme280p = bme280_dev.id == BME280_CHIP_ID;
+  printf("BMP280: found %s\n", bme280p ? "BME280" : "BMP280");
 
+  sensorData data;
+
+  while (true)
+  {
+    if (bmp280_read_fixed(&bme280_dev, &data.temperature, &data.pressure, &data.humidity) != ESP_OK)
+    {
+      printf("Temperature/pressure reading failed\n");
+      continue;
+    }
+    if (bh1750_read(&bh1750_dev, &data.lux) != ESP_OK)
+      printf("Could not read lux data\n");
+    xQueueSend(sensorQueue, &data, 2000 / portTICK_PERIOD_MS);
+    vTaskDelay(pdMS_TO_TICKS(CONFIG_MEASUREMENT_INTERVAL));
+  }
+}
+
+void mqtt_fn(sensorData data)
+{
+  uint32_t command = 0;
+  esp_mqtt_client_config_t mqttConfig =
+      {
+          .uri = CONFIG_BROKER_URI,
+          .cert_pem = (const char *)ca_cert_start,
+          .client_cert_pem = (const char *)client_crt_start,
+          .client_key_pem = (const char *)client_key_start,
+          .username = CONFIG_MQTT_USERNAME,
+          .password = CONFIG_MQTT_PASSWORD,
+      };
+  ESP_LOGI(TAG, "[APP] Free memory: %d bytes", esp_get_free_heap_size());
+  esp_mqtt_client_handle_t client = NULL;
+
+  while (true)
+  {
+    xTaskNotifyWait(0, 0, &command, portMAX_DELAY);
+    switch (command)
+    {
+    case WIFI_CONNECTED:
+      client = esp_mqtt_client_init(&mqttConfig);
+      esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, client);
+      esp_mqtt_client_start(client);
+      break;
+    case MQTT_CONNECTED:
+    {
+      char *buffer;
+      uint8_t my_mac[6];
+      char my_mac_str[13];
+      esp_efuse_mac_get_default(my_mac);
+      buffer = create_json_payload(&data);
+      esp_mqtt_client_publish(client, CONFIG_MQTT_TOPIC, buffer, strlen(buffer), 2, false);
+      free(buffer);
+      break;
+    }
+    case MQTT_PUBLISHED:
+      esp_mqtt_client_stop(client);
+      esp_mqtt_client_destroy(client);
+      esp_wifi_stop();
+      return;
+    default:
+      break;
+    }
+  }
+}
+
+void on_connected(void *params)
+{
+  while (true)
+  {
     sensorData data;
-
-    while (true)
+    if (xQueueReceive(sensorQueue, &data, portMAX_DELAY))
     {
-        if (bmp280_read_fixed(&bme280_dev, &data.temperature, &data.pressure, &data.humidity) != ESP_OK)
-        {
-            printf("Temperature/pressure reading failed\n");
-            continue;
-        }
-        if (bh1750_read(&bh1750_dev, &data.lux) != ESP_OK)
-            printf("Could not read lux data\n");
-        xQueueSend(sensorQueue, &data, 2000 / portTICK_PERIOD_MS);
-        vTaskDelay(pdMS_TO_TICKS(CONFIG_MEASUREMENT_INTERVAL));
+      ESP_ERROR_CHECK(esp_wifi_start());
+      mqtt_fn(data);
     }
-}
-
-void mqtt_fn(sensorData data) {
-    uint32_t command = 0;
-    esp_mqtt_client_config_t mqttConfig = {
-      .uri = CONFIG_BROKER_URI,
-      .cert_pem = (const char*)ca_cert_start,
-      .client_cert_pem = (const char*)client_crt_start,
-      .client_key_pem = (const char*)client_key_start,
-      .username = CONFIG_MQTT_USERNAME,
-      .password = CONFIG_MQTT_PASSWORD,
-    };
-    ESP_LOGI(TAG, "[APP] Free memory: %d bytes", esp_get_free_heap_size());
-    esp_mqtt_client_handle_t client = NULL;
-
-    while (true)
-    {
-        xTaskNotifyWait(0, 0, &command, portMAX_DELAY);
-        switch (command)
-        {
-        case WIFI_CONNECTED:
-            client = esp_mqtt_client_init(&mqttConfig);
-            esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, client);
-            esp_mqtt_client_start(client);
-            break;
-        case MQTT_CONNECTED: {
-            char* buffer;
-            buffer = create_json_payload(&data);
-            esp_mqtt_client_publish(client, "beraton_pub", buffer, strlen(buffer), 2, false);
-            free(buffer);
-            break;
-        }
-        case MQTT_PUBLISHED:
-            esp_mqtt_client_stop(client);
-            esp_mqtt_client_destroy(client);
-            esp_wifi_stop();
-            return;
-        default:
-            break;
-        }
-    }
-}
-
-void on_connected(void* params) {
-    while(true) {
-        sensorData data;
-        if (xQueueReceive(sensorQueue, &data, portMAX_DELAY)) {
-            ESP_ERROR_CHECK(esp_wifi_start());
-            mqtt_fn(data);
-        }
-    }
+  }
 }
 
 void app_main()
 {
-    ESP_LOGI(TAG, "[APP] Startup..");
-    ESP_LOGI(TAG, "[APP] Free memory: %d bytes", esp_get_free_heap_size());
-    ESP_LOGI(TAG, "[APP] IDF version: %s", esp_get_idf_version());
-    esp_chip_info_t chip_info;
-    esp_chip_info(&chip_info);
-    //ESP_ERROR_CHECK(heap_trace_init_standalone(trace_record, NUM_RECORDS));
-    ESP_ERROR_CHECK(i2cdev_init());
-    ESP_ERROR_CHECK(nvs_flash_init());
-    wifi_init_sta();
-    wifi_connect_sta(CONFIG_WIFI_SSID, CONFIG_WIFI_PASSWORD, 10000);
-    
-    sensorQueue = xQueueCreate(10, sizeof(sensorData));
-    xTaskCreate(sensor_measurement, "Sensor measurement", TASK_SIZE_KB * 10, NULL, 5, NULL);
-    xTaskCreate(on_connected, "Connect/reconnect to wifi", TASK_SIZE_KB * 4, NULL, 5, &connectionHandle);
+  ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac_addr));
+  ESP_LOGI(TAG, "[APP] Startup..");
+  ESP_LOGI(TAG, "[APP] Free memory: %d bytes", esp_get_free_heap_size());
+  ESP_LOGI(TAG, "[APP] IDF version: %s", esp_get_idf_version());
+
+  // ESP_ERROR_CHECK(heap_trace_init_standalone(trace_record, NUM_RECORDS));
+  ESP_ERROR_CHECK(i2cdev_init());
+  ESP_ERROR_CHECK(nvs_flash_init());
+  wifi_init_sta();
+  wifi_connect_sta(CONFIG_WIFI_SSID, CONFIG_WIFI_PASSWORD, 10000);
+
+  sensorQueue = xQueueCreate(10, sizeof(sensorData));
+  xTaskCreate(sensor_measurement, "Sensor measurement", TASK_SIZE_KB * 10, NULL, 5, NULL);
+  xTaskCreate(on_connected, "Connect/reconnect to wifi", TASK_SIZE_KB * 4, NULL, 5, &connectionHandle);
 }

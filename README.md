@@ -14,6 +14,7 @@ In order to run the project, you need to run `make menuconfig` and configure the
 - WIFI SSID and password
 - MQTT broker URI (defaults to `mqtt://mqtt.eclipse.org:1883`)
 - MQTT client username and password
+- MQTT topic where client publishes the data
 
 ## WIFI configuration
 

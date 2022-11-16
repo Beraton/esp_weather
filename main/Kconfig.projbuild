@@ -57,6 +57,8 @@ menu "MQTT configuration"
         string "enter mqtt username"
     config MQTT_PASSWORD
         string "enter mqtt password"
+    config MQTT_TOPIC
+        string "enter mqtt topic"
 endmenu
 
 config MEASUREMENT_INTERVAL

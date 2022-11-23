@@ -8,6 +8,7 @@
 #include <esp_system.h>
 #include <esp_log.h>
 #include <esp_wifi.h>
+#include <esp_sleep.h>
 #include <cJSON.h>
 #include "wifi_conn.h"
 #include <mqtt_client.h>
@@ -52,6 +53,7 @@ typedef struct sensorData
   uint32_t pressure;
   uint16_t lux;
 } sensorData;
+
 
 QueueHandle_t sensorQueue;
 TaskHandle_t connectionHandle;
@@ -162,7 +164,6 @@ void sensor_measurement(void *pvParameters)
     if (bh1750_read(&bh1750_dev, &data.lux) != ESP_OK)
       printf("Could not read lux data\n");
     xQueueSend(sensorQueue, &data, 2000 / portTICK_PERIOD_MS);
-    vTaskDelay(pdMS_TO_TICKS(CONFIG_MEASUREMENT_INTERVAL));
   }
 }
 
@@ -195,7 +196,6 @@ void mqtt_fn(sensorData data)
     {
       char *buffer;
       uint8_t my_mac[6];
-      char my_mac_str[13];
       esp_efuse_mac_get_default(my_mac);
       buffer = create_json_payload(&data);
       esp_mqtt_client_publish(client, CONFIG_MQTT_TOPIC, buffer, strlen(buffer), 2, false);
@@ -205,7 +205,11 @@ void mqtt_fn(sensorData data)
     case MQTT_PUBLISHED:
       esp_mqtt_client_stop(client);
       esp_mqtt_client_destroy(client);
-      esp_wifi_stop();
+      wifi_disconnect();
+      ESP_LOGI("ESP_SLEEP", "Entering deep sleep for %d ms...", CONFIG_MEASUREMENT_INTERVAL);
+      esp_deep_sleep_set_rf_option(2);
+      esp_deep_sleep(CONFIG_MEASUREMENT_INTERVAL * 1.0e3);  // interval set in [ms]
+      ESP_LOGI("ESP_SLEEP", "Waking up from sleep...");
       return;
     default:
       break;
@@ -232,6 +236,20 @@ void app_main()
   ESP_LOGI(TAG, "[APP] Startup..");
   ESP_LOGI(TAG, "[APP] Free memory: %d bytes", esp_get_free_heap_size());
   ESP_LOGI(TAG, "[APP] IDF version: %s", esp_get_idf_version());
+
+  gpio_config_t io_config;
+  io_config.mode = GPIO_MODE_OUTPUT;
+  io_config.intr_type = GPIO_INTR_DISABLE;
+  io_config.pin_bit_mask = GPIO_OUTPUT_SEL_PIN;
+  io_config.pull_down_en = 0;
+  io_config.pull_up_en = 0;
+  gpio_config(&io_config);
+
+  bmp280_t bme280_dev = bme280_init(CONFIG_I2C_MASTER_SDA, CONFIG_I2C_MASTER_SCL);
+  i2c_dev_t bh1750_dev = bh1750_init(CONFIG_I2C_MASTER_SDA, CONFIG_I2C_MASTER_SCL, ADDR);
+
+  bool bme280p = bme280_dev.id == BME280_CHIP_ID;
+  printf("BMP280: found %s\n", bme280p ? "BME280" : "BMP280");
 
   #ifdef HEAP_TRACE
   ESP_ERROR_CHECK(heap_trace_init_standalone(trace_record, NUM_RECORDS));

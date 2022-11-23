@@ -15,8 +15,6 @@
 #include <string.h>
 #include <bh1750.h>
 #include <bmp280.h>
-//#include "esp_heap_trace.h"
-
 #include "bme280_init.h"
 #include "bh1750_init.h"
 
@@ -28,6 +26,13 @@
 #endif
 #if defined(CONFIG_BH1750_I2C_ADDRESS_HI)
 #define ADDR BH1750_ADDR_HI
+#endif
+
+// Uncomment to trace potential memory leaks
+//#define HEAP_TRACE
+
+#ifdef HEAP_TRACE
+#include "esp_heap_trace.h"
 #endif
 
 static const char *TAG = "MQTT";
@@ -55,8 +60,10 @@ const uint32_t WIFI_CONNECTED = BIT1;
 const uint32_t MQTT_CONNECTED = BIT2;
 const uint32_t MQTT_PUBLISHED = BIT3;
 
-//#define NUM_RECORDS 100
-// static heap_trace_record_t trace_record[NUM_RECORDS];
+#ifdef HEAP_TRACE
+#define NUM_RECORDS 100
+static heap_trace_record_t trace_record[NUM_RECORDS];
+#endif
 
 void mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
 {
@@ -101,7 +108,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
 char *create_json_payload(sensorData *data)
 {
-  // ESP_ERROR_CHECK(heap_trace_start(HEAP_TRACE_LEAKS));
+  #ifdef HEAP_TRACE
+  ESP_ERROR_CHECK(heap_trace_start(HEAP_TRACE_LEAKS));
+  #endif
   char *payload;
   char *buf = malloc(sizeof(char) * 20);
   cJSON *json_payload = cJSON_CreateObject();
@@ -117,9 +126,11 @@ char *create_json_payload(sensorData *data)
   payload = cJSON_Print(json_payload);
   cJSON_Delete(json_payload);
   free(buf);
-  buf = NULL;
-  // ESP_ERROR_CHECK(heap_trace_stop());
-  // heap_trace_dump();
+  buf =  NULL;
+  #ifdef HEAP_TRACE
+  ESP_ERROR_CHECK(heap_trace_stop());
+  heap_trace_dump();
+  #endif
   return payload;
 }
 
@@ -222,7 +233,9 @@ void app_main()
   ESP_LOGI(TAG, "[APP] Free memory: %d bytes", esp_get_free_heap_size());
   ESP_LOGI(TAG, "[APP] IDF version: %s", esp_get_idf_version());
 
-  // ESP_ERROR_CHECK(heap_trace_init_standalone(trace_record, NUM_RECORDS));
+  #ifdef HEAP_TRACE
+  ESP_ERROR_CHECK(heap_trace_init_standalone(trace_record, NUM_RECORDS));
+  #endif
   ESP_ERROR_CHECK(i2cdev_init());
   ESP_ERROR_CHECK(nvs_flash_init());
   wifi_init_sta();

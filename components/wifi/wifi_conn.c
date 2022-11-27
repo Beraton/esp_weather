@@ -144,7 +144,9 @@ esp_err_t wifi_connect_sta(const char* ssid, const char* pass, int timeout) {
     };
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config);
+    ESP_LOGI("WIFI_CONN_STA", "Event groups wait bits start...");
     EventBits_t res = xEventGroupWaitBits(wifi_events, CONNECTED_GOT_IP | DISCONNECTED, pdTRUE, pdFALSE, pdMS_TO_TICKS(timeout));
+    ESP_LOGI("WIFI_CONN_STA", "Event groups wait bits end...");
     if (res == CONNECTED_GOT_IP) {
         return ESP_OK;
     }

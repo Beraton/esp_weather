@@ -4,6 +4,7 @@
 #include <freertos/task.h>
 #include <freertos/event_groups.h>
 #include <freertos/queue.h>
+#include <freertos/semphr.h>
 #include <nvs_flash.h>
 #include <esp_system.h>
 #include <esp_log.h>
@@ -54,9 +55,10 @@ typedef struct sensorData
   uint16_t lux;
 } sensorData;
 
-
 QueueHandle_t sensorQueue;
 TaskHandle_t connectionHandle;
+TaskHandle_t sensorHandle;
+SemaphoreHandle_t mutexBus;
 
 const uint32_t WIFI_CONNECTED = BIT1;
 const uint32_t MQTT_CONNECTED = BIT2;
@@ -110,9 +112,11 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
 char *create_json_payload(sensorData *data)
 {
-  #ifdef HEAP_TRACE
+
+#ifdef HEAP_TRACE
   ESP_ERROR_CHECK(heap_trace_start(HEAP_TRACE_LEAKS));
-  #endif
+#endif
+
   char *payload;
   char *buf = malloc(sizeof(char) * 20);
   cJSON *json_payload = cJSON_CreateObject();
@@ -128,31 +132,31 @@ char *create_json_payload(sensorData *data)
   payload = cJSON_Print(json_payload);
   cJSON_Delete(json_payload);
   free(buf);
-  buf =  NULL;
-  #ifdef HEAP_TRACE
+  buf = NULL;
+
+#ifdef HEAP_TRACE
   ESP_ERROR_CHECK(heap_trace_stop());
   heap_trace_dump();
-  #endif
+#endif
+
   return payload;
 }
 
-void sensor_measurement(void *pvParameters)
+void sensor_measure(void *pvParameters)
 {
-  gpio_config_t io_config;
-  io_config.mode = GPIO_MODE_OUTPUT;
-  io_config.intr_type = GPIO_INTR_DISABLE;
-  io_config.pin_bit_mask = GPIO_OUTPUT_SEL_PIN;
-  io_config.pull_down_en = 0;
-  io_config.pull_up_en = 0;
-  gpio_config(&io_config);
+  sensorData data;
 
+  // Initializing i2c devices
   bmp280_t bme280_dev = bme280_init(CONFIG_I2C_MASTER_SDA, CONFIG_I2C_MASTER_SCL);
   i2c_dev_t bh1750_dev = bh1750_init(CONFIG_I2C_MASTER_SDA, CONFIG_I2C_MASTER_SCL, ADDR);
 
+  // Checking for BME280
   bool bme280p = bme280_dev.id == BME280_CHIP_ID;
   printf("BMP280: found %s\n", bme280p ? "BME280" : "BMP280");
 
-  sensorData data;
+  // Checking for BH1750
+  bool bh1750 = bh1750_dev.addr == ADDR;
+  printf("BH1750:%s found!\n", bh1750 ? "" : "not");
 
   while (true)
   {
@@ -163,11 +167,13 @@ void sensor_measurement(void *pvParameters)
     }
     if (bh1750_read(&bh1750_dev, &data.lux) != ESP_OK)
       printf("Could not read lux data\n");
+    ESP_LOGI("SENSOR_MEAS", "Releasing mutex -> sending queue item -> suspending task...");
     xQueueSend(sensorQueue, &data, 2000 / portTICK_PERIOD_MS);
+    vTaskSuspend(sensorHandle);
   }
 }
 
-void mqtt_fn(sensorData data)
+void on_connected(void *params)
 {
   uint32_t command = 0;
   esp_mqtt_client_config_t mqttConfig =
@@ -179,11 +185,14 @@ void mqtt_fn(sensorData data)
           .username = CONFIG_MQTT_USERNAME,
           .password = CONFIG_MQTT_PASSWORD,
       };
-  ESP_LOGI(TAG, "[APP] Free memory: %d bytes", esp_get_free_heap_size());
+  // ESP_LOGI(TAG, "[APP] Free memory: %d bytes", esp_get_free_heap_size());
   esp_mqtt_client_handle_t client = NULL;
+  sensorData data;
 
   while (true)
   {
+    ESP_LOGI("ON_CONN", "Queue message number: %d", uxQueueMessagesWaiting(sensorQueue));
+    ESP_ERROR_CHECK(esp_wifi_start());
     xTaskNotifyWait(0, 0, &command, portMAX_DELAY);
     switch (command)
     {
@@ -194,38 +203,34 @@ void mqtt_fn(sensorData data)
       break;
     case MQTT_CONNECTED:
     {
-      char *buffer;
-      uint8_t my_mac[6];
-      esp_efuse_mac_get_default(my_mac);
-      buffer = create_json_payload(&data);
-      esp_mqtt_client_publish(client, CONFIG_MQTT_TOPIC, buffer, strlen(buffer), 2, false);
-      free(buffer);
+      if (xQueueReceive(sensorQueue, &data, portMAX_DELAY))
+      {
+        char *buffer;
+        uint8_t my_mac[6];
+        esp_efuse_mac_get_default(my_mac);
+        buffer = create_json_payload(&data);
+        ESP_LOGI("MQTT_CONN", "JSON payload: %s", buffer);
+        esp_mqtt_client_publish(client, CONFIG_MQTT_TOPIC, buffer, strlen(buffer), 2, false);
+        free(buffer);
+      }
+      else
+      {
+        ESP_LOGI("ON_CONN", "Failed to receive queue item");
+      }
       break;
     }
     case MQTT_PUBLISHED:
       esp_mqtt_client_stop(client);
       esp_mqtt_client_destroy(client);
       wifi_disconnect();
-      ESP_LOGI("ESP_SLEEP", "Entering deep sleep for %d ms...", CONFIG_MEASUREMENT_INTERVAL);
-      esp_deep_sleep_set_rf_option(2);
-      esp_deep_sleep(CONFIG_MEASUREMENT_INTERVAL * 1.0e3);  // interval set in [ms]
-      ESP_LOGI("ESP_SLEEP", "Waking up from sleep...");
-      return;
-    default:
+      ESP_LOGI("ON_CONN", "Entering deep sleep for %d ms...", CONFIG_MEASUREMENT_INTERVAL);
+      esp_deep_sleep_set_rf_option(1);
+      esp_deep_sleep(CONFIG_MEASUREMENT_INTERVAL * 1.0e3); // interval set in [ms]
+      // Everything after esp_deep_sleep() is irrelevant as after it the ESP performs a restart
+      // Ending code just to make sure it works properly
+      ESP_LOGI("ON_CONN", "Waking up from sleep, resuming task...");
+      vTaskResume(sensorHandle);
       break;
-    }
-  }
-}
-
-void on_connected(void *params)
-{
-  while (true)
-  {
-    sensorData data;
-    if (xQueueReceive(sensorQueue, &data, portMAX_DELAY))
-    {
-      ESP_ERROR_CHECK(esp_wifi_start());
-      mqtt_fn(data);
     }
   }
 }
@@ -237,29 +242,21 @@ void app_main()
   ESP_LOGI(TAG, "[APP] Free memory: %d bytes", esp_get_free_heap_size());
   ESP_LOGI(TAG, "[APP] IDF version: %s", esp_get_idf_version());
 
-  gpio_config_t io_config;
-  io_config.mode = GPIO_MODE_OUTPUT;
-  io_config.intr_type = GPIO_INTR_DISABLE;
-  io_config.pin_bit_mask = GPIO_OUTPUT_SEL_PIN;
-  io_config.pull_down_en = 0;
-  io_config.pull_up_en = 0;
-  gpio_config(&io_config);
-
-  bmp280_t bme280_dev = bme280_init(CONFIG_I2C_MASTER_SDA, CONFIG_I2C_MASTER_SCL);
-  i2c_dev_t bh1750_dev = bh1750_init(CONFIG_I2C_MASTER_SDA, CONFIG_I2C_MASTER_SCL, ADDR);
-
-  bool bme280p = bme280_dev.id == BME280_CHIP_ID;
-  printf("BMP280: found %s\n", bme280p ? "BME280" : "BMP280");
-
-  #ifdef HEAP_TRACE
+#ifdef HEAP_TRACE
   ESP_ERROR_CHECK(heap_trace_init_standalone(trace_record, NUM_RECORDS));
-  #endif
+#endif
+
+  // Initializing i2c_dev
   ESP_ERROR_CHECK(i2cdev_init());
+
+  // WiFi initialization
   ESP_ERROR_CHECK(nvs_flash_init());
   wifi_init_sta();
-  wifi_connect_sta(CONFIG_WIFI_SSID, CONFIG_WIFI_PASSWORD, 10000);
+  wifi_connect_sta(CONFIG_WIFI_SSID, CONFIG_WIFI_PASSWORD, 3000);
 
+  // Defining queues and tasks
   sensorQueue = xQueueCreate(10, sizeof(sensorData));
-  xTaskCreate(sensor_measurement, "Sensor measurement", TASK_SIZE_KB * 10, NULL, 5, NULL);
-  xTaskCreate(on_connected, "Connect/reconnect to wifi", TASK_SIZE_KB * 4, NULL, 5, &connectionHandle);
+  mutexBus = xSemaphoreCreateMutex();
+  xTaskCreate(sensor_measure, "Sensor measure", TASK_SIZE_KB * 10, NULL, 5, &sensorHandle);
+  xTaskCreate(on_connected, "On WIFI connection trigger our other tasks", TASK_SIZE_KB * 4, NULL, 5, &connectionHandle);
 }
